@@ -1,61 +1,110 @@
 #!/bin/sh
 
-# sign indexes
+# abuild-sign - sign indexes
 # Copyright (c) 2009 Natanael Copa <ncopa@alpinelinux.org>
 #
-# Distributed under GPL-2
-#
-# Depends on: busybox utilities, fakeroot, 
+# Distributed under GPL-2.0-only
 #
 
-abuild_ver=@VERSION@
-sysconfdir=@sysconfdir@
+program_version=@VERSION@
+sharedir=${ABUILD_SHAREDIR:-@sharedir@}
 
-abuild_conf=${ABUILD_CONF:-"$sysconfdir/abuild.conf"}
-abuild_home=${ABUILD_USERDIR:-"$HOME/.abuild"}
-abuild_userconf=${ABUILD_USERCONF:-"$abuild_home/abuild.conf"}
-
-die() {
-	echo "$@" >&2
+if ! [ -f "$sharedir/functions.sh" ]; then
+	echo "$sharedir/functions.sh: not found" >&2
 	exit 1
+fi
+. "$sharedir/functions.sh"
+
+gzip=$(command -v pigz || echo gzip)
+
+do_sign() {
+	local f i keyname repo
+	local openssl=$(command -v openssl || echo libressl)
+
+	# we are actually only interested in the name, not the file itself
+	keyname=${pubkey##*/}
+
+	for f; do
+		i=$(readlink -f $f)
+		[ -d "$i" ] && i="$i/APKINDEX.tar.gz"
+		repo="${i%/*}"
+		trap 'die "failed to sign $i"' EXIT
+		set -e
+		cd "$repo"
+		sig=".SIGN.RSA.$keyname"
+		$openssl dgst -sha1 -sign "$privkey" -out "$sig" "$i"
+
+		if [ -n "$SOURCE_DATE_EPOCH" ]; then
+			touch -h -d "@$SOURCE_DATE_EPOCH" "$sig"
+		fi
+
+		tmptargz=$(mktemp)
+		tar -f - -c "$sig" | abuild-tar --cut | $gzip -n -9 > "$tmptargz"
+		tmpsigned=$(mktemp)
+		cat "$tmptargz" "$i" > "$tmpsigned"
+		rm -f "$tmptargz" "$sig"
+		chmod 644 "$tmpsigned"
+		mv "$tmpsigned" "$i"
+		msg "Signed $i"
+		set +e
+		trap - EXIT
+	done
 }
 
 usage() {
-	echo "abuild-sign $abuild_ver"
-	echo "usage: abuild-sign [-hq] [-k PRIVKEY] [-p PUBKEY] INDEXFILE..."
-	echo "options:"
-	echo " -h  Show this help"
-	echo " -k  The private key to use for signing"
-	echo " -p  The name of public key. apk add will look for /etc/apk/keys/PUBKEY"
-	exit 1
+	cat >&2 <<-__EOF__
+		$program $program_version - sign indexes
+		Usage: $program [-k PRIVKEY] [-p PUBKEY] INDEXFILE...
+		       $program -e
+		Options:
+		  -e, --installed    Check only of there exist a private key for signing
+		  -k, --private KEY  The private key to use for signing
+		  -p, --public KEY   The name of public key. apk add will look for
+		                     /etc/apk/keys/KEY
+		  -q, --quiet
+		  -h, --help         Show this help
+
+	__EOF__
 }
 
-# read config
-[ -f "$abuild_conf" ] && . "$abuild_conf"
-
-# read user config if exists
-[ -f "$abuild_userconf" ] && . "$abuild_userconf"
-
+check_installed=false
 privkey="$PACKAGER_PRIVKEY"
+pubkey=
+quiet=
 
-while getopts "hk:p:q" opt; do
-	case $opt in
-	h) usage;;
-	k) privkey=$OPTARG;;
-	p) pubkey=$OPTARG;;
-	q) quiet=yes;;
+args=$(getopt -o ek:p:qh --long installed,private:,public:,quiet,help -n "$program" -- "$@")
+if [ $? -ne 0 ]; then
+	usage
+	exit 2
+fi
+eval set -- "$args"
+while true; do
+	case $1 in
+		-e|--installed) check_installed=true;;
+		-k|--private) privkey=$2; shift;;
+		-p|--public) pubkey=$2; shift;;
+		-q|--quiet) quiet=1;; # suppresses msg
+		-h|--help) usage; exit;;
+		--) shift; break;;
+		*) exit 1;; # getopt error
 	esac
+	shift
 done
-shift $(( $OPTIND - 1))
+if [ $# -eq 0 ] && ! $check_installed; then
+	usage
+	exit 2
+fi
 
 if [ -z "$privkey" ]; then
-	echo "No private key found. Use 'abuild-keygen' to generate the keys"
-	echo "Then you can either:"
-	echo " 1. set the PACKAGER_PRIVKEY in $abuild_userconf"
-	echo "    (Note that 'abuild-keygen -a' does this for you)"
-	echo " 2. set the PACKAGER_PRIVKEY in $abuild_conf"
-	echo " 3. specify the key with the -k option"
-	echo ""
+	cat >&2 <<-__EOF__
+		No private key found. Use 'abuild-keygen' to generate the keys.
+		Then you can either:
+		  * set the PACKAGER_PRIVKEY in $ABUILD_USERCONF
+		    ('abuild-keygen -a' does this for you)
+		  * set the PACKAGER_PRIVKEY in $ABUILD_CONF
+		  * specify the key with the -k option to $program
+
+	__EOF__
 	exit 1
 fi
 
@@ -63,26 +112,6 @@ if [ -z "$pubkey" ]; then
 	pubkey=${PACKAGER_PUBKEY:-"${privkey}.pub"}
 fi
 
-# we are actually only interested in the name, not the file itself
-keyname=${pubkey##*/}
-
-for f in "$@"; do
-	i=$(readlink -f $f)
-	[ -d "$i" ] && i="$i/APKINDEX.tar.gz"
-	repo="${i%/*}"
-	cd "$repo" || die "Failed to sign $i"
-	sig=".SIGN.RSA.$keyname"
-	openssl dgst -sha1 -sign "$privkey" -out "$sig" "$i" || die "Failed to sign $i"
-	tmptargz=$(mktemp)
-	tar -c "$sig" | abuild-tar --cut | gzip -9 > "$tmptargz"
-	tmpsigned=$(mktemp)
-	cat "$tmptargz" "$i" > "$tmpsigned"
-	rm -f "$tmptargz" "$sig"
-	mv "$tmpsigned" "$i"
-	chmod 644 "$i"
-	if [ -z "$quiet" ]; then
-		echo "Signed $i"
-	fi
-done
-
-exit 0
+if ! $check_installed; then
+	do_sign "$@"
+fi

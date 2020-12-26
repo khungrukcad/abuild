@@ -1,24 +1,23 @@
-
 PACKAGE		:= abuild
-VERSION		:= 2.7.5
+VERSION		:= 3.7.0_rc1
 
 prefix		?= /usr
+bindir		?= $(prefix)/bin
 sysconfdir	?= /etc
-datadir		?= $(prefix)/share/$(PACKAGE)
-abuildrepo	?= ~/.cache/apks
+sharedir		?= $(prefix)/share/$(PACKAGE)
+mandir		?= $(prefix)/share/man
 
-LUA_VERSION	= 5.1
-LUA_SHAREDIR	?= $(prefix)/share/lua/$(LUA_VERSION)/
-
-SCRIPTS		:= abuild devbuild buildrepo abuild-keygen \
-		abuild-sign newapkbuild abump apkgrel ap buildlab
-USR_BIN_FILES	:= $(SCRIPTS) abuild-tar
+SCRIPTS		:= abuild abuild-keygen abuild-sign newapkbuild \
+		   abump apkgrel buildlab apkbuild-cpan apkbuild-pypi checkapk \
+		   apkbuild-gem-resolver
+USR_BIN_FILES	:= $(SCRIPTS) abuild-tar abuild-gzsplit abuild-sudo abuild-fetch abuild-rmtemp
+MAN_1_PAGES	:= newapkbuild.1
+MAN_5_PAGES	:= APKBUILD.5
 SAMPLES		:= sample.APKBUILD sample.initd sample.confd \
 		sample.pre-install sample.post-install
+AUTOTOOLS_TOOLCHAIN_FILES := config.sub config.guess
 
 SCRIPT_SOURCES	:= $(addsuffix .in,$(SCRIPTS))
-
-DISTFILES=$(SCRIPT_SOURCES) $(SAMPLES) Makefile abuild.conf 
 
 GIT_REV		:= $(shell test -d .git && git describe || echo exported)
 ifneq ($(GIT_REV), exported)
@@ -31,65 +30,99 @@ endif
 CHMOD		:= chmod
 SED		:= sed
 TAR		:= tar
+LINK		= $(CC) $(OBJS-$@) -o $@ $(LDFLAGS) $(LDFLAGS-$@) $(LIBS-$@)
+
+CFLAGS		?= -Wall -Werror -g
 
 SED_REPLACE	:= -e 's:@VERSION@:$(FULL_VERSION):g' \
 			-e 's:@prefix@:$(prefix):g' \
 			-e 's:@sysconfdir@:$(sysconfdir):g' \
-			-e 's:@datadir@:$(datadir):g' \
-			-e 's:@abuildrepo@:$(abuildrepo):g'
+			-e 's:@sharedir@:$(sharedir):g' \
 
-SSL_CFLAGS	:= $(shell pkg-config --cflags openssl)
-SSL_LIBS	:= $(shell pkg-config --libs openssl)
+SSL_CFLAGS	?= $(shell pkg-config --cflags openssl)
+SSL_LDFLAGS	?= $(shell pkg-config --cflags openssl)
+SSL_LIBS	?= $(shell pkg-config --libs openssl)
+ZLIB_LIBS	?= $(shell pkg-config --libs zlib)
+
+OBJS-abuild-tar  = abuild-tar.o
+CFLAGS-abuild-tar.o = $(SSL_CFLAGS)
+LDFLAGS-abuild-tar = $(SSL_LDFLAGS)
+LIBS-abuild-tar = $(SSL_LIBS)
+LIBS-abuild-tar.static = $(LIBS-abuild-tar)
+
+OBJS-abuild-gzsplit = abuild-gzsplit.o
+LDFLAGS-abuild-gzsplit = $(ZLIB_LIBS)
+
+OBJS-abuild-sudo = abuild-sudo.o
+OBJS-abuild-fetch = abuild-fetch.o
 
 .SUFFIXES:	.sh.in .in
-.sh.in.sh:
+%.sh: %.sh.in
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
 	${CHMOD} +x $@
 
-.in:
+%: %.in
 	${SED} ${SED_REPLACE} ${SED_EXTRA} $< > $@
 	${CHMOD} +x $@
 
 P=$(PACKAGE)-$(VERSION)
 
-all: 	$(USR_BIN_FILES)
+all:	$(USR_BIN_FILES) functions.sh
 
 clean:
-	@rm -f $(USR_BIN_FILES)
+	@rm -f $(USR_BIN_FILES) *.o functions.sh
 
-abuild-tar:	abuild-tar.c
-	$(CC) -o $@ $^ -Wl,--as-needed $(SSL_LIBS)
+%.o: %.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) -o $@ -c $<
 
-abuild-tar.static: abuild-tar.c
-	$(CC) -o $@ -static $(SSL_LIBS) $^
+abuild-sudo: abuild-sudo.o
+	$(LINK)
+
+abuild-tar: abuild-tar.o
+	$(LINK)
+
+abuild-fetch: abuild-fetch.o
+	$(LINK)
+
+abuild-gzsplit: abuild-gzsplit.o
+	$(LINK)
+
+abuild-tar.static: abuild-tar.o
+	$(CC) -static $(CPPFLAGS) $(CFLAGS) $(CFLAGS-$@) $^ -o $@ $(LIBS-$@)
 
 help:
 	@echo "$(P) makefile"
 	@echo "usage: make install [ DESTDIR=<path> ]"
-	@echo "       make dist"
 
-install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh aports.lua
-	mkdir -p $(DESTDIR)/$(prefix)/bin $(DESTDIR)/$(sysconfdir) \
-		$(DESTDIR)/$(datadir)
+check: $(USR_BIN_FILE) functions.sh
+	cd tests && bats *.bats
+
+install: $(USR_BIN_FILES) $(SAMPLES) abuild.conf functions.sh
+	install -d $(DESTDIR)/$(bindir) $(DESTDIR)/$(sysconfdir) \
+		$(DESTDIR)/$(sharedir) $(DESTDIR)/$(mandir)/man1 \
+		$(DESTDIR)/$(mandir)/man5
 	for i in $(USR_BIN_FILES); do\
-		install -m 755 $$i $(DESTDIR)/$(prefix)/bin/$$i;\
+		install -m 755 $$i $(DESTDIR)/$(bindir)/$$i;\
+	done
+	chmod 4555 $(DESTDIR)/$(prefix)/bin/abuild-sudo
+	for i in adduser addgroup apk; do \
+		ln -fs abuild-sudo $(DESTDIR)/$(bindir)/abuild-$$i; \
+	done
+	for i in $(MAN_1_PAGES); do\
+		install -m 644 $$i $(DESTDIR)/$(mandir)/man1/$$i;\
+	done
+	for i in $(MAN_5_PAGES); do\
+		install -m 644 $$i $(DESTDIR)/$(mandir)/man5/$$i;\
 	done
 	if [ -n "$(DESTDIR)" ] || [ ! -f "/$(sysconfdir)"/abuild.conf ]; then\
 		cp abuild.conf $(DESTDIR)/$(sysconfdir)/; \
 	fi
-	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild
-	cp functions.sh $(DESTDIR)/$(datadir)/
-	mkdir -p $(DESTDIR)$(LUA_SHAREDIR)
-	cp aports.lua $(DESTDIR)$(LUA_SHAREDIR)/
+	cp $(SAMPLES) $(DESTDIR)/$(prefix)/share/abuild/
+	cp $(AUTOTOOLS_TOOLCHAIN_FILES) $(DESTDIR)/$(prefix)/share/abuild/
+	cp functions.sh $(DESTDIR)/$(sharedir)/
 
-dist:	$(P).tar.bz2
-
-$(P).tar.bz2:	$(DISTFILES)
-	rm -rf $(P)
-	mkdir -p $(P)
-	cp $(DISTFILES) $(P)/
-	tar -cjf $@ $(P)
-	rm -rf $(P)
+depends depend:
+	sudo apk --no-cache -U --virtual .abuild-depends add openssl-dev zlib-dev
 
 .gitignore: Makefile
 	echo "*.tar.bz2" > $@
@@ -98,4 +131,4 @@ $(P).tar.bz2:	$(DISTFILES)
 	done
 
 
-.PHONY: install dist
+.PHONY: install

@@ -1,5 +1,5 @@
 # This is an example APKBUILD file. Use this as a start to creating your own,
-# and remove these comments. 
+# and remove these comments.
 # NOTE: Please fill out the license field for your package! If it is unknown,
 # then please put 'unknown'.
 
@@ -17,32 +17,37 @@ depends_dev=
 makedepends="$depends_dev"
 install=
 subpackages="$pkgname-dev $pkgname-doc"
-source="http://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
+source="https://downloads.sourceforge.net/$pkgname/$pkgname-$pkgver.tar.gz"
 
-
-_builddir="$srcdir"/$pkgname-$pkgver
+builddir="$srcdir"/$pkgname-$pkgver
 
 prepare() {
-	cd "$_builddir"
-	# apply patches here
+	cd "$builddir"
 }
 
 build() {
-	cd "$_builddir"
+	cd "$builddir"
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
 		--mandir=/usr/share/man \
 		--infodir=/usr/share/info
-	make || return 1
+	make
 }
 
 package() {
-	cd "$_builddir"
+	cd "$builddir"
 	make DESTDIR="$pkgdir" install
 
 	# remove the 2 lines below (and this) if there is no init.d script
 	# install -m755 -D "$srcdir"/$pkgname.initd "$pkgdir"/etc/init.d/$pkgname
 	# install -m644 -D "$srcdir"/$pkgname.confd "$pkgdir"/etc/conf.d/$pkgname
+}
+
+check() {
+	# uncomment the 2 lines below if there is a testsuite.  we assume the testsuite
+	# is run using "make check", which is the default for autotools-based build systems.
+	# cd "$builddir"
+	# make check
 }
 
 md5sums="" #generate with 'abuild checksum'

@@ -1,33 +1,40 @@
 #!/bin/sh
 
-# generate signing keys 
+# abuild-keygen - generate signing keys
 # Copyright (c) 2009 Natanael Copa <ncopa@alpinelinux.org>
 #
-# Distributed under GPL-2
-#
-# Depends on: busybox utilities, fakeroot, 
+# Distributed under GPL-2.0-only
 #
 
-abuild_ver=@VERSION@
-sysconfdir=@sysconfdir@
+program_version=@VERSION@
+sharedir=${ABUILD_SHAREDIR:-@sharedir@}
+SUDO="${SUDO:-sudo}"
 
-abuild_conf=${ABUILD_CONF:-"$sysconfdir/abuild.conf"}
-abuild_home=${ABUILD_USERDIR:-"$HOME/.abuild"}
-abuild_userconf=${ABUILD_USERCONF:-"$abuild_home/abuild.conf"}
+if ! [ -f "$sharedir/functions.sh" ]; then
+	echo "$sharedir/functions.sh: not found" >&2
+	exit 1
+fi
+. "$sharedir/functions.sh"
 
-# echo message unless quite mode
-msg() {
-	[ -n "$quiet" ] && return 0
-	echo "$@"
-}
 
 # ask for privkey unless non-interactive mode
 # returns value in global $privkey
 get_privkey_file() {
-	privkey="$abuild_home/$default_name.rsa"
-	[ "$non_interactive" = "yes" ] && return 0
-	echo "Generating public/private rsa key pair for abuild"
-	echo -n "Enter file in which to save the key ($abuild_home/$default_name.rsa): "
+	local emailaddr default_name
+	emailaddr=${PACKAGER##*<}
+	emailaddr=${emailaddr%%>*}
+
+	# if PACKAGER does not contain a valid email address, then ask git
+	if [ -z "$emailaddr" ] || [ "${emailaddr##*@}" = "$emailaddr" ]; then
+		emailaddr=$(git config --get user.email 2>/dev/null)
+	fi
+
+	default_name="${emailaddr:-$USER}-$(printf "%x" $(date +%s))"
+
+	privkey="$ABUILD_USERDIR/$default_name.rsa"
+	[ -n "$non_interactive" ] && return 0
+	msg "Generating public/private rsa key pair for abuild"
+	echo -n "Enter file in which to save the key [$privkey]: "
 
 	read line
 	if [ -n "$line" ]; then
@@ -35,92 +42,99 @@ get_privkey_file() {
 	fi
 }
 
-# print usage and exit
-usage() {
-	echo "abuild-keygen $abuild_ver"
-	echo "usage: abuild-keygen [-ih]"
-	echo "options:"
-	echo " -a  Set PACKAGER_PRIVKEY=<generated key> in $abuild_userconf"
-	echo " -i  Install public key into /etc/apk/keys using sudo"
-	echo " -h  Show this help"
-	echo " -n  Non-interactive. Use defaults"
-	echo " -q  Quiet mode"
-	echo ""
-	exit 1
+do_keygen() {
+	mkdir -p "$ABUILD_USERDIR"
+
+	get_privkey_file
+	pubkey="$privkey.pub"
+
+	# generate the private key in a subshell with stricter umask
+	(
+	umask 0007
+	openssl genrsa -out "$privkey" "$numbits"
+	)
+	openssl rsa -in "$privkey" -pubout -out "$pubkey"
+
+	if [ -n "$install_pubkey" ]; then
+		msg "Installing $pubkey to /etc/apk/keys..."
+		$SUDO mkdir -p /etc/apk/keys
+		$SUDO cp -i "$pubkey" /etc/apk/keys/
+	else
+
+		msg ""
+		msg "You'll need to install $pubkey into "
+		msg "/etc/apk/keys to be able to install packages and repositories signed with"
+		msg "$privkey"
+	fi
+
+	if [ -n "$append_config" ]; then
+		if [ -f "$ABUILD_USERCONF" ]; then
+			# comment out the existing values
+			sed -i -e 's/^PACKAGER_PRIVKEY=/\#&/' "$ABUILD_USERCONF"
+		fi
+		echo "PACKAGER_PRIVKEY=\"$privkey\"" >> "$ABUILD_USERCONF"
+	else
+		msg ""
+		msg "You might want add following line to $ABUILD_USERCONF:"
+		msg ""
+		msg "PACKAGER_PRIVKEY=\"$privkey\""
+		msg ""
+	fi
+
+	msg ""
+	msg "Please remember to make a safe backup of your private key:"
+	msg "$privkey"
+	msg ""
 }
 
-# read config
-[ -f "$abuild_conf" ] && . "$abuild_conf"
+usage() {
+	cat >&2 <<-__EOF__
+		$program $program_version - generate signing keys
+		Usage: $program [-a|--append] [-i|--install] [-n]
+		Options:
+		  -a, --append         Set PACKAGER_PRIVKEY=<generated key> in
+		                       $ABUILD_USERCONF
 
-# read user config if exists
-[ -f "$abuild_userconf" ] && . "$abuild_userconf"
+		  -i, --install        Install public key into /etc/apk/keys using sudo
+		  -n                   Non-interactive. Use defaults
+		  -b, --numbits [BITS] The size of the private key to generate in bits.
+		  -q, --quiet
+		  -h, --help           Show this help
 
-emailaddr=${PACKAGER##*<}
-emailaddr=${emailaddr%%>*}
+		The SUDO variable can be set to pick which tool can be used to
+		elevate privileges, if it is not set it defaults to sudo.
 
-# if PACKAGER does not contain a valid email address, then ask git
-if [ -z "$emailaddr" ] || [ "${emailaddr##*@}" = "$emailaddr" ]; then
-	emailaddr=$(git config --get user.email 2>/dev/null)
+	__EOF__
+}
+
+append_config=
+install_pubkey=
+non_interactive=
+numbits=2048
+quiet=
+
+args=$(getopt -o ab:inqh --long append,numbits:,install,quiet,help -n "$program" -- "$@")
+if [ $? -ne 0 ]; then
+	usage
+	exit 2
 fi
-
-if [ -n "$emailaddr" ]; then
-	default_name="$emailaddr-$(printf "%x" $(date +%s))"
-else
-	default_name="$USER-$(printf "%x" $(date +%s))"
-fi
-
-while getopts "ahinq" opt; do
-	case $opt in
-	a) append_config=yes;;
-	h) usage;;
-	i) install_pubkey=yes;;
-	n) non_interactive=yes;;
-	q) quiet=-quiet;;
+eval set -- "$args"
+while true; do
+	case $1 in
+		-a|--append) append_config=1;;
+		-i|--install) install_pubkey=1;;
+		-n) non_interactive=1;;
+		-b|--numbits) numbits="$2"; shift 1;;
+		-q|--quiet) quiet=1;; # suppresses msg
+		-h|--help) usage; exit;;
+		--) shift; break;;
+		*) exit 1;; # getopt error
 	esac
+	shift
 done
-shift $(( $OPTIND - 1))
-
-mkdir -p "$abuild_home"
-
-get_privkey_file
-pubkey="$privkey.pub"
-
-# generate the private key in a subshell with stricter umask
-(
-umask 0007
-openssl genrsa -out "$privkey" 2048
-)
-openssl rsa -in "$privkey" -pubout -out "$pubkey"
-
-
-if [ -n "$install_pubkey" ]; then
-	msg "Installing $pubkey to /etc/apk/keys..."
-	sudo mkdir -p /etc/apk/keys
-	sudo cp -i "$pubkey" /etc/apk/keys/
-else
-
-	msg ""
-	msg "You'll need to install $pubkey into "
-	msg "/etc/apk/keys to be able to install packages and repositories signed with"
-	msg "$privkey"
+if [ $# -ne 0 ]; then
+	usage
+	exit 2
 fi
 
-if [ -n "$append_config" ]; then
-	if [ -f "$abuild_userconf" ]; then
-		# comment out the existing values
-		sed -i -e 's/^\(PACKAGER_PRIVKEY=.*\)/\#\1/' "$abuild_userconf"
-	fi
-	echo "PACKAGER_PRIVKEY=\"$privkey\"" >> "$abuild_userconf"
-else
-	msg ""
-	msg "You might want add following line to $abuild_userconf:"
-	msg ""
-	msg "PACKAGER_PRIVKEY=\"$privkey\""
-	msg ""
-fi
-
-msg ""
-msg "Please remember to make a safe backup of your private key:"
-msg "$privkey"
-msg ""
-
+do_keygen
